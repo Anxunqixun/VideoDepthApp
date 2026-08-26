@@ -14,6 +14,8 @@ os.environ.setdefault("MKL_NUM_THREADS", str(_NCPU))
 os.environ.setdefault("OPENBLAS_NUM_THREADS", str(_NCPU))
 
 from engine import (  # noqa: E402
+    COLORMAPS,
+    DEFAULT_COLORMAP,
     default_out_name,
     infer_one_image,
     infer_one_video,
@@ -31,6 +33,9 @@ def parse_args(argv=None):
     p.add_argument("--output", "-o", help="输出文件路径")
     p.add_argument("--stride", "--frame-stride", type=int, default=2, dest="stride")
     p.add_argument("--fps", "--target-fps", type=float, default=None, dest="fps")
+    p.add_argument("--colormap", "-c", default=DEFAULT_COLORMAP, choices=list(COLORMAPS),
+                   help="深度配色，默认 turbo")
+    p.add_argument("--invert", action="store_true", help="反转近远颜色")
     return p.parse_args(argv)
 
 
@@ -46,7 +51,7 @@ def main(argv=None):
         out = args.output or os.path.join(os.path.dirname(src), default_out_name(src, "image"))
         os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
         depth, _, dt = infer_one_image(rgb, progress=lambda s: print(s, flush=True))
-        save_depth_png(depth, out)
+        save_depth_png(depth, out, colormap=args.colormap, invert=args.invert)
         print("WROTE", out, "time_s", round(dt, 3), flush=True)
         return 0
     src = os.path.abspath(args.video)
@@ -56,7 +61,7 @@ def main(argv=None):
         src, frame_stride=args.stride, target_fps=args.fps,
         progress=lambda s: print(s, flush=True),
     )
-    save_video(depths, out, fps=fps, is_depths=True)
+    save_video(depths, out, fps=fps, is_depths=True, colormap=args.colormap, invert=args.invert)
     print("WROTE", out, "time_s", round(dt, 3), "fps", fps, flush=True)
     return 0
 

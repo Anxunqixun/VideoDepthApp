@@ -27,6 +27,33 @@ _SESSION = None
 _SESS_LOCK = threading.Lock()
 _INFERNO = None
 
+# OpenCV LUT names. turbo is the default: more even, less crushed-purple than inferno.
+COLORMAPS = (
+    "turbo",
+    "viridis",
+    "plasma",
+    "magma",
+    "inferno",
+    "jet",
+    "hot",
+    "ocean",
+    "cool",
+    "gray",
+)
+COLORMAP_LABELS = {
+    "turbo": "青橙 turbo（推荐）",
+    "viridis": "绿黄 viridis",
+    "plasma": "紫粉 plasma",
+    "magma": "暗紫 magma",
+    "inferno": "热力 inferno（原来）",
+    "jet": "彩虹 jet",
+    "hot": "红热 hot",
+    "ocean": "海洋 ocean",
+    "cool": "冷色 cool",
+    "gray": "灰度 gray",
+}
+DEFAULT_COLORMAP = "turbo"
+
 
 def _app_dir():
     if getattr(sys, "frozen", False):
@@ -72,18 +99,49 @@ def _load_inferno():
     return _INFERNO
 
 
-def depth_to_inferno(depth_hw):
-    lut = _load_inferno()
+def _cv_colormap(name):
+    table = {
+        "turbo": cv2.COLORMAP_TURBO,
+        "viridis": cv2.COLORMAP_VIRIDIS,
+        "plasma": cv2.COLORMAP_PLASMA,
+        "magma": cv2.COLORMAP_MAGMA,
+        "inferno": cv2.COLORMAP_INFERNO,
+        "jet": cv2.COLORMAP_JET,
+        "hot": cv2.COLORMAP_HOT,
+        "ocean": cv2.COLORMAP_OCEAN,
+        "cool": cv2.COLORMAP_COOL,
+    }
+    return table.get((name or DEFAULT_COLORMAP).lower())
+
+
+def depth_to_color(depth_hw, colormap=DEFAULT_COLORMAP, invert=False, dmin=None, dmax=None):
     d = np.asarray(depth_hw, dtype=np.float32)
-    dmin, dmax = float(d.min()), float(d.max())
+    if dmin is None:
+        dmin = float(d.min())
+    if dmax is None:
+        dmax = float(d.max())
     denom = (dmax - dmin) if dmax > dmin else 1.0
     idx = ((d - dmin) / denom * 255.0).astype(np.uint8)
-    return lut[idx]
+    if invert:
+        idx = 255 - idx
+    name = (colormap or DEFAULT_COLORMAP).lower()
+    if name in ("gray", "grey", "grayscale"):
+        return np.stack([idx, idx, idx], axis=-1)
+    cmap = _cv_colormap(name)
+    if cmap is None:
+        # fall back to bundled inferno LUT
+        lut = _load_inferno()
+        return lut[idx]
+    bgr = cv2.applyColorMap(idx, cmap)
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def save_depth_png(depth_hw, output_path):
-    vis = depth_to_inferno(depth_hw)
-    # imencode + tofile to support non-ascii paths
+def depth_to_inferno(depth_hw):
+    return depth_to_color(depth_hw, colormap="inferno")
+
+
+def save_depth_png(depth_hw, output_path, colormap=DEFAULT_COLORMAP, invert=False):
+    vis = depth_to_color(depth_hw, colormap=colormap, invert=invert)
     ok, buf = cv2.imencode(".png", cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
     if not ok:
         raise RuntimeError("无法编码 PNG")
@@ -231,15 +289,13 @@ def infer_one_video(path, frame_stride=2, target_fps=None, progress=None, max_re
     return np.stack(depths, axis=0), out_fps, frames, dt
 
 
-def save_video(frames, output_video_path, fps=10, is_depths=False):
+def save_video(frames, output_video_path, fps=10, is_depths=False, colormap=DEFAULT_COLORMAP, invert=False):
     if is_depths:
         dmin, dmax = float(frames.min()), float(frames.max())
-        denom = (dmax - dmin) if dmax > dmin else 1.0
-        lut = _load_inferno()
-        vis_list = []
-        for i in range(frames.shape[0]):
-            idx = ((frames[i] - dmin) / denom * 255.0).astype(np.uint8)
-            vis_list.append(lut[idx])
+        vis_list = [
+            depth_to_color(frames[i], colormap=colormap, invert=invert, dmin=dmin, dmax=dmax)
+            for i in range(frames.shape[0])
+        ]
         frames_out = vis_list
     else:
         frames_out = [frames[i] for i in range(frames.shape[0])]

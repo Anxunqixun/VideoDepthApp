@@ -42,8 +42,11 @@ def _setup_tcl():
 _setup_tcl()
 
 from engine import (  # noqa: E402
+    COLORMAP_LABELS,
+    COLORMAPS,
+    DEFAULT_COLORMAP,
     default_out_name,
-    depth_to_inferno,
+    depth_to_color,
     infer_one_image,
     infer_one_video,
     load_rgb_image,
@@ -125,16 +128,28 @@ def run_gui():
             ttk.Entry(frm, textvariable=self.var_fps, width=8).grid(row=3, column=1, sticky="w", padx=4)
             ttk.Label(frm, text="可空=不限；填写则再按目标帧率抽帧").grid(row=3, column=2, columnspan=2, sticky="w")
 
+            ttk.Label(frm, text="深度配色").grid(row=4, column=0, sticky="w")
+            self.var_cmap = tk.StringVar(value=COLORMAP_LABELS[DEFAULT_COLORMAP])
+            self.cmb_cmap = ttk.Combobox(
+                frm, textvariable=self.var_cmap, width=22, state="readonly",
+                values=[COLORMAP_LABELS[k] for k in COLORMAPS],
+            )
+            self.cmb_cmap.grid(row=4, column=1, sticky="w", padx=4)
+            self.var_invert = tk.BooleanVar(value=False)
+            ttk.Checkbutton(frm, text="反转近远（近处变暗）", variable=self.var_invert).grid(
+                row=4, column=2, columnspan=2, sticky="w"
+            )
+
             hint = (
                 "抽帧规则：先按间隔 N 取样；若同时填写目标帧率，则综合间隔 = N × round(原fps/目标fps)。"
                 " 输出帧率 = 原fps / 综合间隔。图片走单帧 T=1。视频为逐帧 ONNX（优先体积与速度，无 32 帧时序窗）。"
             )
             ttk.Label(frm, text=hint, wraplength=740, justify="left").grid(
-                row=4, column=0, columnspan=5, sticky="w", pady=(2, 6)
+                row=5, column=0, columnspan=5, sticky="w", pady=(2, 6)
             )
 
             btnrow = ttk.Frame(frm)
-            btnrow.grid(row=5, column=0, columnspan=5, sticky="w", pady=6)
+            btnrow.grid(row=6, column=0, columnspan=5, sticky="w", pady=6)
             self.btn_start = ttk.Button(btnrow, text="开始", command=self._start)
             self.btn_start.pack(side=tk.LEFT)
             self.var_status = tk.StringVar(value="就绪（首次推理会加载模型）")
@@ -203,6 +218,13 @@ def run_gui():
                 raise ValueError("目标帧率必须为正数，或留空")
             return v
 
+        def _parse_cmap(self):
+            label = self.var_cmap.get().strip()
+            for key, lab in COLORMAP_LABELS.items():
+                if lab == label or key == label.lower():
+                    return key
+            return DEFAULT_COLORMAP
+
         def _start(self):
             if self.worker and self.worker.is_alive():
                 messagebox.showinfo("提示", "正在处理，请稍候")
@@ -223,6 +245,8 @@ def run_gui():
             try:
                 stride = self._parse_stride()
                 tfps = self._parse_fps()
+                cmap = self._parse_cmap()
+                invert = bool(self.var_invert.get())
             except Exception as e:
                 messagebox.showerror("参数错误", str(e))
                 return
@@ -236,7 +260,7 @@ def run_gui():
                         rgb = load_rgb_image(path)
                         depth, _, dt = infer_one_image(rgb, progress=lambda s: self.msg_q.put(("progress", s)))
                         out = os.path.join(outdir, default_out_name(path, "image"))
-                        vis = save_depth_png(depth, out)
+                        vis = save_depth_png(depth, out, colormap=cmap, invert=invert)
                         self.msg_q.put(("done_image", out, vis, dt))
                     else:
                         depths, fps, _, dt = infer_one_video(
@@ -245,8 +269,8 @@ def run_gui():
                         )
                         out = os.path.join(outdir, default_out_name(path, "video"))
                         self.msg_q.put(("progress", "正在保存深度视频…"))
-                        save_video(depths, out, fps=fps, is_depths=True)
-                        preview = depth_to_inferno(depths[len(depths) // 2])
+                        save_video(depths, out, fps=fps, is_depths=True, colormap=cmap, invert=invert)
+                        preview = depth_to_color(depths[len(depths) // 2], colormap=cmap, invert=invert)
                         self.msg_q.put(("done_video", out, preview, dt, int(depths.shape[0]), fps))
                 except Exception:
                     self.msg_q.put(("error", traceback.format_exc()))
