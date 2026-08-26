@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+vendor/checkpoints/*.pth
+*.mp4
