@@ -1,4 +1,9 @@
-# 深度估计 VideoDepthApp (slim)
+# 深度估计 VideoDepthApp
+
+Windows 请下 **便携文件夹**（官方签名的 pythonw.exe 启动，避免杀软误报），不要用旧的 Nuitka 单文件 exe。
+
+解压后双击 `打开界面.bat`。
+
 
 离线 CPU 深度估计。ONNX Runtime，无 PyTorch。两个程序：
 
