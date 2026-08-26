@@ -1,0 +1,5 @@
+kind=int8
+net=518
+dynamic=False
+letterbox=1
+size=32249397

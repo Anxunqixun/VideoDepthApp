@@ -3,5 +3,9 @@ __pycache__/
 *.pyc
 build/
 dist/
-vendor/checkpoints/*.pth
-*.mp4
+*.build/
+*.dist/
+*.onefile-build/
+test_frame.jpg
+models/vda_vits_t1_fp32.onnx
+models/vda_vits_t1_fp16.onnx

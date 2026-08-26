@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build Windows Nuitka
 
 on:
   push:
@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  windows-exe:
+  windows-nuitka:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -16,33 +16,30 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements-cpu.txt
+          cache-dependency-path: requirements-build.txt
 
-      - name: Install CPU PyTorch and deps
+      - name: Install runtime and Nuitka
         run: |
           python -m pip install -U pip wheel
-          pip install torch==2.1.1 torchvision==0.16.1 --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements-cpu.txt
+          pip install -r requirements-build.txt
 
-      - name: Download vits weights
-        shell: pwsh
+      - name: Nuitka CLI
         run: |
-          New-Item -ItemType Directory -Force -Path vendor/checkpoints | Out-Null
-          curl.exe -L --retry 8 --retry-all-errors -o vendor/checkpoints/video_depth_anything_vits.pth "https://huggingface.co/depth-anything/Video-Depth-Anything-Small/resolve/main/video_depth_anything_vits.pth"
-          if ((Get-Item vendor/checkpoints/video_depth_anything_vits.pth).Length -lt 50000000) { throw "weights download too small" }
+          python -m nuitka --standalone --onefile --assume-yes-for-downloads --lto=no --output-dir=dist --output-filename=vda-cli.exe --include-data-files=models/vda_vits_t1.onnx=models/vda_vits_t1.onnx --include-data-files=models/inferno.npy=models/inferno.npy --include-package=onnxruntime --include-package-data=onnxruntime --nofollow-import-to=IPython --nofollow-import-to=pytest --nofollow-import-to=unittest --nofollow-import-to=setuptools --nofollow-import-to=pip --nofollow-import-to=tkinter --nofollow-import-to=numpy.tests --nofollow-import-to=onnxruntime.datasets --nofollow-import-to=onnxruntime.tools --nofollow-import-to=onnxruntime.quantization --windows-console-mode=attach --remove-output vda_cli.py
 
-      - name: PyInstaller Windows onefile
-        run: pyinstaller --noconfirm --clean VideoDepthApp-windows.spec
+      - name: Nuitka GUI
+        run: |
+          python -m nuitka --standalone --onefile --assume-yes-for-downloads --lto=no --output-dir=dist --output-filename=vda-gui.exe --enable-plugin=tk-inter --include-data-files=models/vda_vits_t1.onnx=models/vda_vits_t1.onnx --include-data-files=models/inferno.npy=models/inferno.npy --include-package=onnxruntime --include-package-data=onnxruntime --nofollow-import-to=IPython --nofollow-import-to=pytest --nofollow-import-to=unittest --nofollow-import-to=setuptools --nofollow-import-to=pip --nofollow-import-to=numpy.tests --nofollow-import-to=onnxruntime.datasets --nofollow-import-to=onnxruntime.tools --nofollow-import-to=onnxruntime.quantization --windows-console-mode=disable --remove-output vda_gui.py
 
       - name: List dist
         shell: pwsh
-        run: Get-ChildItem dist -Recurse | Select-Object FullName, Length
+        run: Get-ChildItem dist -Recurse -File | Select-Object FullName, Length
 
       - uses: actions/upload-artifact@v4
         with:
-          name: VideoDepthApp-windows
+          name: VideoDepthApp-windows-nuitka
           path: |
-            dist/VideoDepthApp.exe
-            dist/*.exe
+            dist/vda-cli.exe
+            dist/vda-gui.exe
           if-no-files-found: error
           compression-level: 0
