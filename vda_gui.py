@@ -156,6 +156,8 @@ def run_gui():
                 command=self._on_cpu_change,
             )
             self.spn_cpu.pack(side=tk.LEFT)
+            self.spn_cpu.bind("<KeyRelease>", self._on_cpu_change)
+            self.spn_cpu.bind("<FocusOut>", self._on_cpu_change)
             ttk.Label(cpu_row, text="%").pack(side=tk.LEFT, padx=(2, 8))
             self.sld_cpu = ttk.Scale(
                 cpu_row, from_=1, to=100, variable=self.var_cpu,
@@ -213,7 +215,11 @@ def run_gui():
             if self._cpu_updating:
                 return
             try:
-                self._set_cpu_percent(self.var_cpu.get())
+                raw = self.spn_cpu.get()
+            except Exception:
+                raw = self.var_cpu.get()
+            try:
+                self._set_cpu_percent(raw)
             except Exception:
                 self._set_cpu_percent(DEFAULT_CPU_PERCENT)
 
