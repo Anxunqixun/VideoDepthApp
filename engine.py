@@ -8,14 +8,62 @@ import sys
 import threading
 import time
 
+# Thread helpers live above cv2/numpy so OMP/MKL see the default before those
+# libraries initialize. Default is 30% of cores (at least 1 thread), not 100%.
+DEFAULT_CPU_PERCENT = 30
+
+
+def host_cpu_count():
+    return os.cpu_count() or 8
+
+
+def clamp_cpu_percent(percent):
+    try:
+        p = float(percent)
+    except (TypeError, ValueError):
+        p = DEFAULT_CPU_PERCENT
+    if p != p:  # NaN
+        p = DEFAULT_CPU_PERCENT
+    return max(1, min(100, int(round(p))))
+
+
+def threads_from_percent(percent, ncpu=None):
+    ncpu = host_cpu_count() if ncpu is None else max(1, int(ncpu))
+    p = clamp_cpu_percent(percent)
+    return max(1, int(round(ncpu * p / 100.0)))
+
+
+def cpu_percent_label(percent, ncpu=None):
+    ncpu = host_cpu_count() if ncpu is None else max(1, int(ncpu))
+    p = clamp_cpu_percent(percent)
+    return "%d%% ≈ %d 线程 / %d 核" % (p, threads_from_percent(p, ncpu), ncpu)
+
+
+def apply_runtime_threads(num_threads):
+    n = max(1, int(num_threads))
+    os.environ["OMP_NUM_THREADS"] = str(n)
+    os.environ["MKL_NUM_THREADS"] = str(n)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(n)
+    os.environ["ORT_NUM_THREADS"] = str(n)
+    try:
+        import cv2
+        cv2.setNumThreads(n)
+    except Exception:
+        pass
+    return n
+
+
+_NCPU = host_cpu_count()
+_DEFAULT_THREADS = threads_from_percent(DEFAULT_CPU_PERCENT, _NCPU)
+os.environ.setdefault("OMP_NUM_THREADS", str(_DEFAULT_THREADS))
+os.environ.setdefault("MKL_NUM_THREADS", str(_DEFAULT_THREADS))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", str(_DEFAULT_THREADS))
+os.environ.setdefault("ORT_NUM_THREADS", str(_DEFAULT_THREADS))
+
 import cv2
 import numpy as np
 
-_NCPU = os.cpu_count() or 8
-os.environ.setdefault("OMP_NUM_THREADS", str(_NCPU))
-os.environ.setdefault("MKL_NUM_THREADS", str(_NCPU))
-os.environ.setdefault("OPENBLAS_NUM_THREADS", str(_NCPU))
-os.environ.setdefault("ORT_NUM_THREADS", str(_NCPU))
+cv2.setNumThreads(_DEFAULT_THREADS)
 
 NET = 518
 MAX_RES = 640
@@ -24,6 +72,7 @@ STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 MODEL_NAME = "vda_vits_t1.onnx"
 
 _SESSION = None
+_SESSION_THREADS = None
 _SESS_LOCK = threading.Lock()
 _INFERNO = None
 
@@ -175,18 +224,32 @@ def letterbox_nchw(rgb_u8, net=NET):
     return np.ascontiguousarray(x, dtype=np.float32), (top, left, nh, nw, h, w)
 
 
-def load_session():
-    global _SESSION
+def session_num_threads():
+    return _SESSION_THREADS
+
+
+def load_session(cpu_percent=None, num_threads=None):
+    """Load or recreate the ORT CPU session for the requested thread budget."""
+    global _SESSION, _SESSION_THREADS
+    if num_threads is None:
+        if cpu_percent is not None:
+            num_threads = threads_from_percent(cpu_percent)
+        elif _SESSION_THREADS is not None:
+            num_threads = _SESSION_THREADS
+        else:
+            num_threads = threads_from_percent(DEFAULT_CPU_PERCENT)
+    num_threads = apply_runtime_threads(num_threads)
     with _SESS_LOCK:
-        if _SESSION is not None:
+        if _SESSION is not None and _SESSION_THREADS == num_threads:
             return _SESSION
         import onnxruntime as ort
         so = ort.SessionOptions()
-        so.intra_op_num_threads = _NCPU
-        so.inter_op_num_threads = min(2, _NCPU)
+        so.intra_op_num_threads = num_threads
+        so.inter_op_num_threads = min(2, num_threads)
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         path = find_model()
         _SESSION = ort.InferenceSession(path, sess_options=so, providers=["CPUExecutionProvider"])
+        _SESSION_THREADS = num_threads
         return _SESSION
 
 
@@ -211,14 +274,14 @@ def load_rgb_image(path):
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def infer_one_image(rgb, progress=None, max_res=MAX_RES):
+def infer_one_image(rgb, progress=None, max_res=MAX_RES, cpu_percent=None):
     if progress:
         progress("正在准备图片…")
     rgb = apply_max_res(rgb, max_res)
     if progress:
         progress("正在推理（单帧 T=1 / ONNX）…")
     t0 = time.time()
-    load_session()
+    load_session(cpu_percent=cpu_percent)
     depth = infer_prepared(rgb)
     dt = time.time() - t0
     if progress:
@@ -266,7 +329,7 @@ def read_video_frames(video_path, process_length=-1, target_fps=-1, max_res=MAX_
     return np.stack(frames, axis=0), fps
 
 
-def infer_one_video(path, frame_stride=2, target_fps=None, progress=None, max_res=MAX_RES):
+def infer_one_video(path, frame_stride=2, target_fps=None, progress=None, max_res=MAX_RES, cpu_percent=None):
     if progress:
         progress("正在读取视频…")
     tfps = -1 if not target_fps else float(target_fps)
@@ -276,7 +339,7 @@ def infer_one_video(path, frame_stride=2, target_fps=None, progress=None, max_re
     n = int(frames.shape[0])
     if progress:
         progress("已读取 %d 帧，输出约 %.2f fps，开始逐帧推理…" % (n, out_fps))
-    load_session()
+    load_session(cpu_percent=cpu_percent)
     t0 = time.time()
     depths = []
     for i in range(n):
