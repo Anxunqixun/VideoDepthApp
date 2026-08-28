@@ -178,7 +178,7 @@ def run_gui():
             )
             self.chk_gpu.pack(side=tk.LEFT)
             ttk.Label(
-                gpu_row, text="NVIDIA CUDA；不可用则自动回退 CPU，不会崩溃",
+                gpu_row, text="（NVIDIA CUDA；不可用则自动回退 CPU，不会崩溃）",
             ).pack(side=tk.LEFT, padx=(8, 0))
 
             hint = (
@@ -243,12 +243,16 @@ def run_gui():
         def _parse_gpu(self):
             return bool(self.var_gpu.get())
 
+        def _ready_status(self):
+            status = session_status_text()
+            if not status.endswith(("。", "！", ".", "!")):
+                status += "。"
+            return "模型已就绪。%s请选择图片或视频" % status
+
         def _reload_session(self, cpu_percent, use_gpu, waiting="正在加载模型…"):
             self.msg_q.put(("progress", waiting))
             load_session(cpu_percent=cpu_percent, use_gpu=use_gpu)
-            self.msg_q.put(
-                ("progress", "模型已就绪。%s。请选择图片或视频" % session_status_text())
-            )
+            self.msg_q.put(("progress", self._ready_status()))
 
         def _on_gpu_toggle(self):
             if self.worker and self.worker.is_alive():
