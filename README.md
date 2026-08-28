@@ -7,8 +7,8 @@ Windows 请下 **便携文件夹**（官方签名的 pythonw.exe 启动，避免
 
 离线 CPU 深度估计。ONNX Runtime，无 PyTorch。两个程序：
 
-- `vda-cli` 命令行：`--image` / `--video` / `--stride` / `--fps` / `--output`
-- `vda-gui` 中文界面：选图片 / 选视频 / 抽帧间隔 / 目标帧率
+- `vda-cli` 命令行：`--image` / `--video` / `--stride` / `--fps` / `--output` / `--cpu-percent`
+- `vda-gui` 中文界面：选图片 / 选视频 / 抽帧间隔 / 目标帧率 / CPU 占用
 
 图片走单帧 T=1。视频逐帧跑同一 ONNX（优先体积和速度，无官方 32 帧时序窗）。
 
@@ -22,10 +22,13 @@ Linux Nuitka 产物（本机已编）：
 ```bash
 pip install -r requirements.txt
 python vda_cli.py --image photo.jpg -o depth.png
+python vda_cli.py --image photo.jpg -o depth.png --cpu-percent 30
 python vda_gui.py
 ```
 
 默认 `max_res=640`，网络输入 letterbox 到 518×518。
+
+CPU 占用默认 **30%**（`threads = max(1, round(核数 × 百分比 / 100))`），限制 ONNX Runtime / OpenMP / OpenCV 线程，避免占满全部核心。
 
 ## Nuitka 打包
 
