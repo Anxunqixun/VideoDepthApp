@@ -73,8 +73,13 @@ MODEL_NAME = "vda_vits_t1.onnx"
 
 _SESSION = None
 _SESSION_THREADS = None
+_SESSION_USE_GPU = None
+_SESSION_PROVIDER = None
+_SESSION_GPU_NOTE = None
 _SESS_LOCK = threading.Lock()
 _INFERNO = None
+CUDA_PROVIDER = "CUDAExecutionProvider"
+CPU_PROVIDER = "CPUExecutionProvider"
 
 # OpenCV LUT names. turbo is the default: more even, less crushed-purple than inferno.
 COLORMAPS = (
@@ -228,9 +233,69 @@ def session_num_threads():
     return _SESSION_THREADS
 
 
-def load_session(cpu_percent=None, num_threads=None):
-    """Load or recreate the ORT CPU session for the requested thread budget."""
-    global _SESSION, _SESSION_THREADS
+def session_provider():
+    return _SESSION_PROVIDER
+
+
+def session_gpu_note():
+    return _SESSION_GPU_NOTE
+
+
+def get_session_info():
+    return {
+        "provider": _SESSION_PROVIDER or CPU_PROVIDER,
+        "use_gpu": bool(_SESSION_USE_GPU),
+        "using_cuda": _SESSION_PROVIDER == CUDA_PROVIDER,
+        "note": _SESSION_GPU_NOTE,
+        "threads": _SESSION_THREADS,
+    }
+
+
+def session_status_text():
+    """Chinese status for the current ORT device (GUI / CLI)."""
+    if _SESSION_GPU_NOTE:
+        return _SESSION_GPU_NOTE
+    if _SESSION_PROVIDER == CUDA_PROVIDER:
+        return "当前推理设备：GPU（CUDA）"
+    return "当前推理设备：CPU"
+
+
+def reset_session():
+    """Drop the cached ORT session (tests / explicit reload)."""
+    global _SESSION, _SESSION_THREADS, _SESSION_USE_GPU, _SESSION_PROVIDER, _SESSION_GPU_NOTE
+    with _SESS_LOCK:
+        _SESSION = None
+        _SESSION_THREADS = None
+        _SESSION_USE_GPU = None
+        _SESSION_PROVIDER = None
+        _SESSION_GPU_NOTE = None
+
+
+def _resolve_providers(ort, use_gpu):
+    """Pick ORT providers. GPU path is NVIDIA CUDA only; never claim DML/TensorRT."""
+    if not use_gpu:
+        return [CPU_PROVIDER], None
+    available = []
+    try:
+        available = list(ort.get_available_providers())
+    except Exception:
+        available = []
+    if CUDA_PROVIDER not in available:
+        return [CPU_PROVIDER], (
+            "未检测到 CUDAExecutionProvider，已回退到 CPU。"
+            "要用 GPU，请先卸载 onnxruntime，再执行：pip install -r requirements-gpu.txt"
+            "（需要 NVIDIA 显卡与匹配的 CUDA）。"
+        )
+    return [CUDA_PROVIDER, CPU_PROVIDER], None
+
+
+def _create_ort_session(ort, path, so, providers):
+    return ort.InferenceSession(path, sess_options=so, providers=providers)
+
+
+def load_session(cpu_percent=None, num_threads=None, use_gpu=None):
+    """Load or recreate the ORT session when the thread budget or GPU toggle changes."""
+    global _SESSION, _SESSION_THREADS, _SESSION_USE_GPU, _SESSION_PROVIDER, _SESSION_GPU_NOTE
     if num_threads is None:
         if cpu_percent is not None:
             num_threads = threads_from_percent(cpu_percent)
@@ -238,9 +303,17 @@ def load_session(cpu_percent=None, num_threads=None):
             num_threads = _SESSION_THREADS
         else:
             num_threads = threads_from_percent(DEFAULT_CPU_PERCENT)
+    if use_gpu is None:
+        use_gpu = bool(_SESSION_USE_GPU) if _SESSION_USE_GPU is not None else False
+    else:
+        use_gpu = bool(use_gpu)
     num_threads = apply_runtime_threads(num_threads)
     with _SESS_LOCK:
-        if _SESSION is not None and _SESSION_THREADS == num_threads:
+        if (
+            _SESSION is not None
+            and _SESSION_THREADS == num_threads
+            and _SESSION_USE_GPU == use_gpu
+        ):
             return _SESSION
         import onnxruntime as ort
         so = ort.SessionOptions()
@@ -248,8 +321,28 @@ def load_session(cpu_percent=None, num_threads=None):
         so.inter_op_num_threads = min(2, num_threads)
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         path = find_model()
-        _SESSION = ort.InferenceSession(path, sess_options=so, providers=["CPUExecutionProvider"])
+        providers, note = _resolve_providers(ort, use_gpu)
+        try:
+            sess = _create_ort_session(ort, path, so, providers)
+        except Exception as exc:
+            if use_gpu and providers[0] != CPU_PROVIDER:
+                sess = _create_ort_session(ort, path, so, [CPU_PROVIDER])
+                note = "GPU 初始化失败，已回退到 CPU：%s" % exc
+            else:
+                raise
+        used = []
+        try:
+            used = list(sess.get_providers())
+        except Exception:
+            used = list(providers)
+        primary = used[0] if used else CPU_PROVIDER
+        if use_gpu and primary != CUDA_PROVIDER and not note:
+            note = "已请求 GPU，但会话实际使用 %s，已回退到 CPU。" % primary
+        _SESSION = sess
         _SESSION_THREADS = num_threads
+        _SESSION_USE_GPU = use_gpu
+        _SESSION_PROVIDER = primary
+        _SESSION_GPU_NOTE = note
         return _SESSION
 
 
@@ -274,14 +367,14 @@ def load_rgb_image(path):
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def infer_one_image(rgb, progress=None, max_res=MAX_RES, cpu_percent=None):
+def infer_one_image(rgb, progress=None, max_res=MAX_RES, cpu_percent=None, use_gpu=None):
     if progress:
         progress("正在准备图片…")
     rgb = apply_max_res(rgb, max_res)
     if progress:
         progress("正在推理（单帧 T=1 / ONNX）…")
     t0 = time.time()
-    load_session(cpu_percent=cpu_percent)
+    load_session(cpu_percent=cpu_percent, use_gpu=use_gpu)
     depth = infer_prepared(rgb)
     dt = time.time() - t0
     if progress:
@@ -329,7 +422,7 @@ def read_video_frames(video_path, process_length=-1, target_fps=-1, max_res=MAX_
     return np.stack(frames, axis=0), fps
 
 
-def infer_one_video(path, frame_stride=2, target_fps=None, progress=None, max_res=MAX_RES, cpu_percent=None):
+def infer_one_video(path, frame_stride=2, target_fps=None, progress=None, max_res=MAX_RES, cpu_percent=None, use_gpu=None):
     if progress:
         progress("正在读取视频…")
     tfps = -1 if not target_fps else float(target_fps)
@@ -339,7 +432,7 @@ def infer_one_video(path, frame_stride=2, target_fps=None, progress=None, max_re
     n = int(frames.shape[0])
     if progress:
         progress("已读取 %d 帧，输出约 %.2f fps，开始逐帧推理…" % (n, out_fps))
-    load_session(cpu_percent=cpu_percent)
+    load_session(cpu_percent=cpu_percent, use_gpu=use_gpu)
     t0 = time.time()
     depths = []
     for i in range(n):
