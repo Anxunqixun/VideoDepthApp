@@ -58,6 +58,7 @@ from engine import (  # noqa: E402
     load_session,
     save_depth_png,
     save_video,
+    session_status_text,
 )
 
 
@@ -88,8 +89,8 @@ def run_gui():
         def __init__(self):
             super().__init__()
             self.title("深度估计")
-            self.geometry("780x760")
-            self.minsize(640, 600)
+            self.geometry("780x800")
+            self.minsize(640, 640)
             self.msg_q = queue.Queue()
             self.worker = None
             self.input_path = ""
@@ -168,17 +169,30 @@ def run_gui():
             self.var_cpu.trace_add("write", self._on_cpu_change)
             self._on_cpu_change()
 
+            ttk.Label(frm, text="推理设备").grid(row=6, column=0, sticky="w")
+            gpu_row = ttk.Frame(frm)
+            gpu_row.grid(row=6, column=1, columnspan=4, sticky="w", padx=4)
+            self.var_gpu = tk.BooleanVar(value=False)
+            self.chk_gpu = ttk.Checkbutton(
+                gpu_row, text="使用 GPU", variable=self.var_gpu, command=self._on_gpu_toggle,
+            )
+            self.chk_gpu.pack(side=tk.LEFT)
+            ttk.Label(
+                gpu_row, text="NVIDIA CUDA；不可用则自动回退 CPU，不会崩溃",
+            ).pack(side=tk.LEFT, padx=(8, 0))
+
             hint = (
                 "抽帧规则：先按间隔 N 取样；若同时填写目标帧率，则综合间隔 = N × round(原fps/目标fps)。"
                 " 输出帧率 = 原fps / 综合间隔。图片走单帧 T=1。视频为逐帧 ONNX（优先体积与速度，无 32 帧时序窗）。"
-                " CPU 占用限制推理线程数，默认 30%，不会占满全部核心。"
+                " CPU 占用限制 CPU 推理线程数，默认 30%，不会占满全部核心。"
+                " 勾选「使用 GPU」且 CUDA 生效时，该百分比不会限制显卡占用（仍用于 CPU 回退路径的线程设置）。"
             )
             ttk.Label(frm, text=hint, wraplength=740, justify="left").grid(
-                row=6, column=0, columnspan=5, sticky="w", pady=(2, 6)
+                row=7, column=0, columnspan=5, sticky="w", pady=(2, 6)
             )
 
             btnrow = ttk.Frame(frm)
-            btnrow.grid(row=7, column=0, columnspan=5, sticky="w", pady=6)
+            btnrow.grid(row=8, column=0, columnspan=5, sticky="w", pady=6)
             self.btn_start = ttk.Button(btnrow, text="开始", command=self._start)
             self.btn_start.pack(side=tk.LEFT)
             self.var_status = tk.StringVar(value="就绪（首次推理会加载模型）")
@@ -226,12 +240,38 @@ def run_gui():
         def _parse_cpu(self):
             return self._set_cpu_percent(self.var_cpu.get())
 
+        def _parse_gpu(self):
+            return bool(self.var_gpu.get())
+
+        def _reload_session(self, cpu_percent, use_gpu, waiting="正在加载模型…"):
+            self.msg_q.put(("progress", waiting))
+            load_session(cpu_percent=cpu_percent, use_gpu=use_gpu)
+            self.msg_q.put(
+                ("progress", "模型已就绪。%s。请选择图片或视频" % session_status_text())
+            )
+
+        def _on_gpu_toggle(self):
+            if self.worker and self.worker.is_alive():
+                return
+            cpu_percent = self._parse_cpu()
+            use_gpu = self._parse_gpu()
+
+            def work():
+                try:
+                    self._reload_session(
+                        cpu_percent,
+                        use_gpu,
+                        waiting="正在按设备设置重新加载模型…",
+                    )
+                except Exception as e:
+                    self.msg_q.put(("error", "模型加载失败: %s" % e))
+
+            threading.Thread(target=work, daemon=True).start()
+
         def _preload_model(self):
             def work():
                 try:
-                    self.msg_q.put(("progress", "正在加载模型…"))
-                    load_session(cpu_percent=DEFAULT_CPU_PERCENT)
-                    self.msg_q.put(("progress", "模型已就绪，请选择图片或视频"))
+                    self._reload_session(DEFAULT_CPU_PERCENT, False)
                 except Exception as e:
                     self.msg_q.put(("error", "模型加载失败: %s" % e))
             threading.Thread(target=work, daemon=True).start()
@@ -313,20 +353,23 @@ def run_gui():
                 cmap = self._parse_cmap()
                 invert = bool(self.var_invert.get())
                 cpu_percent = self._parse_cpu()
+                use_gpu = self._parse_gpu()
             except Exception as e:
                 messagebox.showerror("参数错误", str(e))
                 return
             self.btn_start.configure(state="disabled")
+            self.chk_gpu.configure(state="disabled")
             self.var_status.set("启动中…")
 
             def work():
                 try:
-                    load_session(cpu_percent=cpu_percent)
+                    load_session(cpu_percent=cpu_percent, use_gpu=use_gpu)
+                    self.msg_q.put(("progress", session_status_text()))
                     if kind == "image":
                         rgb = load_rgb_image(path)
                         depth, _, dt = infer_one_image(
                             rgb, progress=lambda s: self.msg_q.put(("progress", s)),
-                            cpu_percent=cpu_percent,
+                            cpu_percent=cpu_percent, use_gpu=use_gpu,
                         )
                         out = os.path.join(outdir, default_out_name(path, "image"))
                         vis = save_depth_png(depth, out, colormap=cmap, invert=invert)
@@ -335,7 +378,7 @@ def run_gui():
                         depths, fps, _, dt = infer_one_video(
                             path, frame_stride=stride, target_fps=tfps,
                             progress=lambda s: self.msg_q.put(("progress", s)),
-                            cpu_percent=cpu_percent,
+                            cpu_percent=cpu_percent, use_gpu=use_gpu,
                         )
                         out = os.path.join(outdir, default_out_name(path, "video"))
                         self.msg_q.put(("progress", "正在保存深度视频…"))
@@ -372,14 +415,17 @@ def run_gui():
                         self.var_status.set("完成：%s（%.2f 秒）" % (out, dt))
                         self._show_preview(vis)
                         self.btn_start.configure(state="normal")
+                        self.chk_gpu.configure(state="normal")
                     elif kind == "done_video":
                         out, preview, dt, n, fps = msg[1], msg[2], msg[3], msg[4], msg[5]
                         self.var_status.set("完成：%s（%d 帧，%.2f fps，%.1f 秒）" % (out, n, fps, dt))
                         self._show_preview(preview)
                         self.btn_start.configure(state="normal")
+                        self.chk_gpu.configure(state="normal")
                     elif kind == "error":
                         self.var_status.set("出错")
                         self.btn_start.configure(state="normal")
+                        self.chk_gpu.configure(state="normal")
                         messagebox.showerror("出错", msg[1][-2000:])
             except queue.Empty:
                 pass
